@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alertas en Tiempo Real</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        #messages {
+            margin: 20px 0;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        .message {
+            margin: 15px 0;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            border-left: 4px solid #007bff;
+        }
+        .title {
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .meta {
+            color: #666;
+            font-size: 0.9em;
+            margin-bottom: 10px;
+        }
+        .content {
+            color: #333;
+            margin-top: 10px;
+        }
+        .area {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #fff;
+            border: 1px solid #eee;
+            border-radius: 4px;
+        }
+        .area-title {
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        .area-info {
+            color: #666;
+            font-size: 0.9em;
+        }
+        .debug {
+            font-size: 0.8em;
+            color: #666;
+            margin: 10px 0;
+        }
+        .status {
+            padding: 10px;
+            background-color: #e3f2fd;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .connection-status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            background-color: #e3f2fd;
+            color: #155724;
+        }
+        .error {
+            color: #dc3545;
+        }
+        .success {
+            color: #28a745;
+        }
+        .connected {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+    </style>
+</head>
+<body>
+    <h1>Alertas en Tiempo Real - Sistema CAP</h1>
+    <div id="status" class="status">Esperando conexión...</div>
+    <div id="messages"></div>
+    <div id="connection-status" class="connection-status">Iniciando conexión...</div>
+    <div id="debug" class="debug"></div>
+
+    <!-- Socket.IO client library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script>
+        console.log('Iniciando cliente WebSocket...');
+        
+        // Capturar errores globales
+        window.onerror = function(message, source, lineno, colno, error) {
+            console.error('Error JavaScript:', message, error);
+            addDebugMessage('Error JavaScript: ' + message);
+            return true;
+        };
+
+        // MODIFICADO: Usar una URL fija para el WebSocket
+        const socketUrl = 'http://localhost:5000';
+        console.log('WebSocket URL:', socketUrl);
+        addDebugMessage('WebSocket URL: ' + socketUrl);
+
+        // Configuración del WebSocket
+        const socket = io(socketUrl, {
+            transports: ['websocket', 'polling'],  // Intenta WebSocket primero, luego polling
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            reconnectionAttempts: Infinity,  // Intentar reconectar indefinidamente
+            timeout: 20000,  // Aumenta el timeout
+            autoConnect: true
+        });
+
+        // Función para actualizar el estado de conexión
+        function updateConnectionStatus(status, type) {
+            const statusDiv = document.getElementById('connection-status');
+            statusDiv.textContent = status;
+            statusDiv.className = 'connection-status ' + type;
+            console.log('Estado de conexión:', status);
+        }
+
+        // Función para mostrar estado
+        function updateStatus(status, type = 'info') {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = status;
+            statusDiv.className = 'status ' + type;
+            console.log('Estado de la aplicación:', status);
+        }
+
+        // Función para mostrar mensajes de depuración
+        function addDebugMessage(message) {
+            const debugDiv = document.getElementById('debug');
+            const debugElement = document.createElement('div');
+            debugElement.className = 'debug';
+            debugElement.textContent = new Date().toLocaleTimeString() + ': ' + message;
+            debugDiv.appendChild(debugElement);
+            debugDiv.scrollTop = debugDiv.scrollHeight;
+            console.log('Debug:', message);
+        }
+
+        // Función para mostrar un mensaje de alerta
+        function displayMessage(data) {
+            try {
+                console.log('Procesando mensaje:', data);
+                
+                // Verificar si los datos están completos
+                if (!data) {
+                    throw new Error('Datos de mensaje vacíos');
+                }
+                
+                // Crear elemento para el mensaje
+                const messageElement = document.createElement('div');
+                messageElement.className = 'message';
+                
+                // Contenido HTML del mensaje
+                let html = `
+                    <div class="title">${data.title || 'Sin título'}</div>
+                    <div class="meta">
+                        <span>Hora: ${data.updated || 'No disponible'}</span>
+                `;
+                
+                // Añadir información del evento si está disponible
+                if (data.info && data.info.length > 0) {
+                    html += `- <span>Evento: ${data.info[0].event || 'No especificado'}</span>`;
+                }
+                
+                html += `</div><div class="content">`;
+                
+                // Añadir descripción y otros detalles
+                if (data.info && data.info.length > 0) {
+                    html += `<p><strong>Descripción:</strong> ${data.info[0].description || 'No disponible'}</p>`;
+                }
+                
+                html += `
+                    <p><strong>Identificador:</strong> ${data.identifier || 'No disponible'}</p>
+                    <p><strong>Tipo de mensaje:</strong> ${data.msgType || 'No disponible'}</p>
+                    <p><strong>Gravedad:</strong> ${data.info[0].severity || 'No disponible'}</p>
+                    <p><strong>Ámbito:</strong> ${data.scope || 'No disponible'}</p>
+                </div>`;
+                
+                messageElement.innerHTML = html;
+                
+                // Agregar el mensaje al inicio de la lista
+                const messagesDiv = document.getElementById('messages');
+                messagesDiv.insertBefore(messageElement, messagesDiv.firstChild);
+                
+                // Asegurarse de que el mensaje esté visible
+                messageElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                
+                console.log('Mensaje agregado a la interfaz');
+            } catch (error) {
+                console.error('Error al procesar mensaje:', error);
+                addDebugMessage('Error al procesar mensaje: ' + error.message);
+            }
+        }
+
+        // Evento de conexión
+        socket.on('connect', function() {
+            console.log('Conectado al servidor WebSocket');
+            updateConnectionStatus('Conectado', 'connected');
+            updateStatus('Conectado al servidor WebSocket', 'success');
+            
+            // Suscribirse al canal de mensajes
+            socket.on('new_message', function(data) {
+                console.log('Recibiendo mensaje del servidor:', data);
+                try {
+                    displayMessage(data);
+                } catch (error) {
+                    console.error('Error al mostrar mensaje:', error);
+                    addDebugMessage('Error al mostrar mensaje: ' + error.message);
+                }
+            });
+        });
+
+        // Manejar mensajes recibidos
+        socket.on('message', function(data) {
+            console.log('Mensaje recibido:', JSON.stringify(data));
+            addDebugMessage('Mensaje recibido del servidor');
+            
+            // Mostrar el mensaje en la interfaz
+            displayMessage(data);
+        });
+
+        // Manejar errores
+        socket.on('connect_error', function(error) {
+            console.error('Error de conexión:', error);
+            updateConnectionStatus('Error de conexión', 'error');
+            addDebugMessage('Error de conexión: ' + error);
+            updateStatus('Error de conexión con el servidor', 'error');
+        });
+
+        // Manejar desconexión
+        socket.on('disconnect', function(reason) {
+            console.log('Desconectado del servidor. Razón:', reason);
+            updateConnectionStatus('Desconectado', 'disconnected');
+            addDebugMessage('Desconectado del servidor. Razón: ' + reason);
+            updateStatus('Desconectado del servidor', 'error');
+        });
+
+        // Manejar reconexión
+        socket.on('reconnect', function(attemptNumber) {
+            console.log('Reconectado después de intento:', attemptNumber);
+            updateConnectionStatus('Reconectado', 'connected');
+            addDebugMessage('Reconectado después de intento: ' + attemptNumber);
+            updateStatus('Reconectado al servidor', 'success');
+        });
+
+        // Manejar intento de reconexión
+        socket.on('reconnect_attempt', function(attemptNumber) {
+            console.log('Intento de reconexión:', attemptNumber);
+            updateConnectionStatus('Intentando reconectar...', 'disconnected');
+            addDebugMessage('Intento de reconexión: ' + attemptNumber);
+        });
+
+        // Manejar fallo de reconexión
+        socket.on('reconnect_failed', function() {
+            console.error('Fallo en la reconexión');
+            updateConnectionStatus('Fallo en la reconexión', 'error');
+            addDebugMessage('Fallo en la reconexión');
+            updateStatus('Fallo en la reconexión con el servidor', 'error');
+        });
+
+        // Manejar error
+        socket.on('error', function(error) {
+            console.error('Error de Socket.IO:', error);
+            addDebugMessage('Error de Socket.IO: ' + error);
+        });
+
+        // Inicializar la interfaz
+        updateStatus('Iniciando aplicación...', 'info');
+        addDebugMessage('Aplicación iniciada');
+
+        // Función para probar conexión manualmente (puede ser útil para debugging)
+        function testConnection() {
+            try {
+                console.log('Probando conexión...');
+                addDebugMessage('Probando conexión...');
+                
+                if (socket.connected) {
+                    console.log('Socket ya está conectado');
+                    addDebugMessage('Socket ya está conectado');
+                } else {
+                    console.log('Socket no está conectado, intentando conectar');
+                    addDebugMessage('Socket no está conectado, intentando conectar');
+                    socket.connect();
+                }
+            } catch (error) {
+                console.error('Error al probar conexión:', error);
+                addDebugMessage('Error al probar conexión: ' + error.message);
+            }
+        }
+
+        // Conectar automáticamente al cargar la página
+        document.addEventListener('DOMContentLoaded', function() {
+            addDebugMessage('Documento cargado, iniciando conexión');
+            
+            // Podemos probar la conexión después de un breve retraso
+            setTimeout(testConnection, 1000);
+            
+            // Añadir botón de reconexión para facilitar pruebas
+            const statusDiv = document.getElementById('status');
+            const reconnectBtn = document.createElement('button');
+            reconnectBtn.textContent = 'Reconectar manualmente';
+            reconnectBtn.style.marginLeft = '10px';
+            reconnectBtn.style.padding = '5px 10px';
+            reconnectBtn.style.backgroundColor = '#007bff';
+            reconnectBtn.style.color = 'white';
+            reconnectBtn.style.border = 'none';
+            reconnectBtn.style.borderRadius = '4px';
+            reconnectBtn.style.cursor = 'pointer';
+            reconnectBtn.onclick = testConnection;
+            statusDiv.appendChild(reconnectBtn);
+        });
+    </script>
+</body>
+</html>
