@@ -19,7 +19,7 @@ socketio_logger.setLevel(logging.WARNING)
 engineio_logger = logging.getLogger('engineio.server')
 engineio_logger.setLevel(logging.WARNING)
 
-app = Flask(__name__, template_folder='templates')
+app = Flask(__name__, template_folder='IIGEA/templates')
 CORS(app, resources={r"/*": {"origins": "*", "allow_headers": ["Content-Type", "Authorization", "Access-Control-Allow-Credentials"], "supports_credentials": True}})
 app.config['SECRET_KEY'] = 'secret!'
 socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True, async_mode='threading')
