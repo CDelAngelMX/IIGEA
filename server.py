@@ -1,176 +1,166 @@
+import eventlet
+
+# Parcheo de eventlet
+eventlet.monkey_patch()
+
 from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 import requests
-import json
-import threading
-import time
 import xml.etree.ElementTree as ET
 import logging
 from datetime import datetime, timedelta
 
-# Configurar logging
+# Configuración básica de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Reducir logs de SocketIO
-socketio_logger = logging.getLogger('socketio.server')
-socketio_logger.setLevel(logging.WARNING)
-engineio_logger = logging.getLogger('engineio.server')
-engineio_logger.setLevel(logging.WARNING)
+# Reducir logs verbosos de socketio/engineio
+logging.getLogger('socketio.server').setLevel(logging.WARNING)
+logging.getLogger('engineio.server').setLevel(logging.WARNING)
 
+# Flask y SocketIO
 app = Flask(__name__, template_folder='templates')
 CORS(app, resources={r"/*": {"origins": "*", "allow_headers": ["Content-Type", "Authorization", "Access-Control-Allow-Credentials"], "supports_credentials": True}})
 app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True, async_mode='threading')
+socketio = SocketIO(app, cors_allowed_origins="*", logger=False, engineio_logger=False, async_mode='eventlet')
 
-# Global variables
+# Variables globales
 messages = []
-last_identifier = None  # Modificación clave: Usar identifier en lugar de tiempo
+last_identifier = None
 last_fetch_time = datetime.now() - timedelta(seconds=2)
 
-# Función auxiliar para obtener texto de manera segura
+# Telegram
+TELEGRAM_CHAT_ID = "6134394569"
+TELEGRAM_BOT_TOKEN = "7659663435:AAESZfoSnX-7F4d44_lgBotKRK3uEymeINY"
+
+
+def notificar_telegram(mensaje):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje}, timeout=5)
+    except Exception as e:
+        logger.error(f"Telegram fallo: {e}")
+
+
 def get_text(element, xpath):
-    """Obtiene el texto de un elemento XML de manera segura."""
     node = element.find(xpath)
     return node.text if node is not None else None
 
-# Function to fetch RSS feed
+
 def fetch_rss():
     global messages, last_identifier, last_fetch_time
+    errores = 0
+    notificado = False
+    heartbeat = 0
+
     while True:
         try:
-            current_time = datetime.now()
-            # Consultar el RSS cada segundo
-            if (current_time - last_fetch_time).total_seconds() >= 1:
-                last_fetch_time = current_time
+            if (datetime.now() - last_fetch_time).total_seconds() >= 1:
+                last_fetch_time = datetime.now()
                 try:
-                    logger.info("=== Iniciando obtención de RSS ===")
-                    response = requests.get(
-                        'https://rss.sasmex.net/api/v1/alerts/latest/cap/',
-                        timeout=2,
-                        headers={'Accept': 'application/xml'}
-                    )
-                    if response.status_code == 200:
-                        logger.info("=== Respuesta RSS recibida ===")
+                    logger.info("🛰️ Obteniendo RSS...")
+                    resp = requests.get('https://rss.sasmex.net/api/v1/alerts/latest/cap/', timeout=2, headers={'Accept': 'application/xml'})
+                    if resp.status_code != 200:
+                        errores += 1
+                        logger.warning(f"Status: {resp.status_code}")
+                        if errores >= 3 and not notificado:
+                            notificar_telegram("⚠️ Falla RSS x3")
+                            notificado = True
+                        continue
+
+                    errores = 0
+                    notificado = False
+                    root = ET.fromstring(resp.content)
+                    entries = root.findall('{http://www.w3.org/2005/Atom}entry')
+
+                    for entry in entries:
                         try:
-                            root = ET.fromstring(response.content)
-                            logger.info("=== XML parseado correctamente ===")
-                            entries = root.findall('{http://www.w3.org/2005/Atom}entry')
-                            logger.info(f"=== Encontradas {len(entries)} entradas ===")
-                            for entry in entries:
-                                try:
-                                    # Obtener campos básicos
-                                    title = entry.find('{http://www.w3.org/2005/Atom}title')
-                                    updated = entry.find('{http://www.w3.org/2005/Atom}updated')
-                                    alert_content = entry.find('{http://www.w3.org/2005/Atom}content')
-                                    if title is None or updated is None or alert_content is None:
-                                        logger.warning("Entrada incompleta, saltando...")
-                                        continue
-                                    title_text = title.text if title is not None else ""
-                                    updated_text = updated.text if updated is not None else ""
-                                    # Convertir updated a datetime para comparación
-                                    try:
-                                        updated_dt = datetime.fromisoformat(updated_text.replace('Z', '+00:00'))
-                                    except (ValueError, TypeError):
-                                        logger.warning(f"Error al convertir fecha: {updated_text}")
-                                        continue
-                                    # Obtener contenido CAP
-                                    alert = alert_content.find('{urn:oasis:names:tc:emergency:cap:1.1}alert')
-                                    if alert is None:
-                                        logger.warning("No se encontró el contenido CAP, saltando...")
-                                        continue
-                                    # Obtener identifier
-                                    current_identifier = get_text(alert, '{urn:oasis:names:tc:emergency:cap:1.1}identifier')
-                                    if not current_identifier:
-                                        logger.warning("Alerta sin identifier, saltando...")
-                                        continue
-                                    # Verificar si ya procesamos este identifier
-                                    if current_identifier == last_identifier:
-                                        logger.info(f"Identifier {current_identifier} ya procesado")
-                                        continue
-                                    # Construir mensaje usando get_text
-                                    message = {
-                                        'title': title_text,
-                                        'updated': updated_text,
-                                        'identifier': current_identifier,
-                                        'sender': get_text(alert, '{urn:oasis:names:tc:emergency:cap:1.1}sender'),
-                                        'sent': get_text(alert, '{urn:oasis:names:tc:emergency:cap:1.1}sent'),
-                                        'status': get_text(alert, '{urn:oasis:names:tc:emergency:cap:1.1}status'),
-                                        'msgType': get_text(alert, '{urn:oasis:names:tc:emergency:cap:1.1}msgType'),
-                                        'source': get_text(alert, '{urn:oasis:names:tc:emergency:cap:1.1}source'),
-                                        'scope': get_text(alert, '{urn:oasis:names:tc:emergency:cap:1.1}scope'),
-                                        'code': get_text(alert, '{urn:oasis:names:tc:emergency:cap:1.1}code'),
-                                        'note': get_text(alert, '{urn:oasis:names:tc:emergency:cap:1.1}note'),
-                                        'references': get_text(alert, '{urn:oasis:names:tc:emergency:cap:1.1}references'),
-                                        'info': []
-                                    }
-                                    # Obtener información detallada
-                                    info = alert.find('{urn:oasis:names:tc:emergency:cap:1.1}info')
-                                    if info is not None:
-                                        info_data = {
-                                            'language': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}language'),
-                                            'category': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}category'),
-                                            'event': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}event'),
-                                            'responseType': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}responseType'),
-                                            'urgency': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}urgency'),
-                                            'severity': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}severity'),
-                                            'certainty': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}certainty'),
-                                            'audience': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}audience'),
-                                            'eventCode': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}eventCode'),
-                                            'effective': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}effective'),
-                                            'onset': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}onset'),
-                                            'expires': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}expires'),
-                                            'senderName': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}senderName'),
-                                            'headline': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}headline'),
-                                            'description': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}description'),
-                                            'instruction': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}instruction'),
-                                            'web': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}web'),
-                                            'contact': get_text(info, '{urn:oasis:names:tc:emergency:cap:1.1}contact')
-                                        }
-                                        message['info'].append(info_data)
-                                    # Emitir mensaje al WebSocket
-                                    socketio.emit('new_message', message)
-                                    logger.info(f"=== Mensaje enviado al WebSocket: {message['title']} ===")
-                                    # Actualizar estado
-                                    last_identifier = current_identifier
-                                    messages.append(message)
-                                except Exception as e:
-                                    logger.error(f"Error al procesar entrada RSS: {str(e)}")
-                                    continue
-                        except ET.ParseError as e:
-                            logger.error(f"Error al parsear XML: {str(e)}")
-                            logger.error(f"Contenido de la respuesta: {response.text[:500]}...")
-                            time.sleep(1)
-                            continue
-                    else:
-                        logger.warning(f"Error al obtener el RSS. Código de estado: {response.status_code}")
-                        logger.error(f"Contenido de la respuesta: {response.text[:500]}...")
-                        time.sleep(1)
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"Error en la solicitud HTTP: {str(e)}")
-                    time.sleep(1)
-                    continue
+                            title = entry.find('{http://www.w3.org/2005/Atom}title')
+                            updated = entry.find('{http://www.w3.org/2005/Atom}updated')
+                            content = entry.find('{http://www.w3.org/2005/Atom}content')
+                            if not title or not updated or not content:
+                                continue
+
+                            identifier = get_text(content.find('{urn:oasis:names:tc:emergency:cap:1.1}alert'), '{urn:oasis:names:tc:emergency:cap:1.1}identifier')
+                            if not identifier or identifier == last_identifier:
+                                continue
+
+                            msg = {
+                                'title': title.text,
+                                'updated': updated.text,
+                                'identifier': identifier,
+                                'info': []
+                            }
+
+                            alert = content.find('{urn:oasis:names:tc:emergency:cap:1.1}alert')
+                            if alert is not None:
+                                for tag in ['sender','sent','status','msgType','source','scope','code','note','references']:
+                                    msg[tag] = get_text(alert, f'{{urn:oasis:names:tc:emergency:cap:1.1}}{tag}')
+
+                                info = alert.find('{urn:oasis:names:tc:emergency:cap:1.1}info')
+                                if info is not None:
+                                    msg['info'].append({
+                                        tag: get_text(info, f'{{urn:oasis:names:tc:emergency:cap:1.1}}{tag}')
+                                        for tag in [
+                                            'language','category','event','responseType','urgency','severity','certainty',
+                                            'audience','eventCode','effective','onset','expires','senderName','headline',
+                                            'description','instruction','web','contact']
+                                    })
+
+                            socketio.emit('new_message', msg)
+                            last_identifier = identifier
+                            messages.append(msg)
+                            if len(messages) > 1000:
+                                messages = messages[-500:]
+                            notificar_telegram(f"🔔 Alerta sísmica: {title.text}")
+                        except Exception as e:
+                            logger.error(f"Error procesando entrada: {e}")
+                except Exception as e:
+                    errores += 1
+                    logger.error(f"Fallo petición RSS: {e}")
+                    if errores >= 3 and not notificado:
+                        notificar_telegram("⚠️ Falla RSS x3")
+                        notificado = True
+
+            heartbeat += 1
+            if heartbeat % 600 == 0:
+                logger.info("✅ fetch_rss activo")
+
         except Exception as e:
-            logger.error(f"Error crítico: {str(e)}")
-            time.sleep(1)
-        # Pequeño delay para no sobrecargar el CPU
-        time.sleep(0.1)
+            logger.critical(f"Error crítico en fetch_rss: {e}")
+
+        socketio.sleep(0.1)
+
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
+
 @app.route('/messages', methods=['GET'])
 def get_messages():
     return jsonify({'messages': messages})
 
-# Manejador de eventos para la conexión de WebSocket
+
 @socketio.on('connect')
-def handle_connect():
+def conectado():
     logger.info(f"Cliente conectado: {request.sid}")
 
+
+@socketio.on('disconnect')
+def desconectado():
+    logger.info(f"Cliente desconectado: {request.sid}")
+
+
+socketio.on('mensaje_simulado')
+def handle_mensaje_simulado(data):
+    print(f"🧪 Mensaje simulado recibido: {data}")
+    emit('new_message', data, broadcast=True)
+    return {'status': 'ok'}  # <-- Esto es el ACK que recibe el emisor
+
+
 if __name__ == '__main__':
-    logger.info("=== Iniciando servidor ===")
+    notificar_telegram("✅ server.py iniciado")
     socketio.start_background_task(fetch_rss)
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
