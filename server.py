@@ -1,4 +1,6 @@
 import eventlet
+
+# Parcheo de eventlet
 eventlet.monkey_patch()
 
 from flask import Flask, render_template, jsonify, request
@@ -9,20 +11,24 @@ import xml.etree.ElementTree as ET
 import logging
 from datetime import datetime, timedelta
 
+# Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 logging.getLogger('socketio.server').setLevel(logging.WARNING)
 logging.getLogger('engineio.server').setLevel(logging.WARNING)
 
+# Flask y SocketIO
 app = Flask(__name__, template_folder='templates')
 CORS(app, resources={r"/*": {"origins": "*"}})
 app.config['SECRET_KEY'] = 'secret!'
 socketio = SocketIO(app, cors_allowed_origins="*", logger=False, engineio_logger=False, async_mode='eventlet')
 
+# Variables globales
 messages = []
 last_identifier = None
 last_fetch_time = datetime.now() - timedelta(seconds=2)
 
+# Telegram
 TELEGRAM_CHAT_ID = "6134394569"
 TELEGRAM_BOT_TOKEN = "7659663435:AAESZfoSnX-7F4d44_lgBotKRK3uEymeINY"
 
@@ -33,9 +39,14 @@ def notificar_telegram(mensaje):
     except Exception as e:
         logger.error(f"Telegram fallo: {e}")
 
-def get_text(element, xpath, ns):
+def get_text(element, xpath, ns, default=None):
     node = element.find(xpath, ns)
-    return node.text if node is not None else None
+    return node.text if node is not None and node.text else default
+
+ns = {
+    'atom': 'http://www.w3.org/2005/Atom',
+    'cap': 'urn:oasis:names:tc:emergency:cap:1.1'
+}
 
 def fetch_rss():
     global messages, last_identifier, last_fetch_time
@@ -43,96 +54,95 @@ def fetch_rss():
     notificado = False
     heartbeat = 0
 
-    ns = {
-        'atom': 'http://www.w3.org/2005/Atom',
-        'cap': 'urn:oasis:names:tc:emergency:cap:1.1'
-    }
-
     while True:
         try:
-            if (datetime.now() - last_fetch_time).total_seconds() >= 1:
-                last_fetch_time = datetime.now()
-                logger.info("🛰️ Obteniendo RSS...")
+            current_time = datetime.now()
+            if (current_time - last_fetch_time).total_seconds() >= 1:
+                last_fetch_time = current_time
+                logger.info("\U0001F680 Obteniendo RSS...")
                 try:
-                    resp = requests.get('https://rss.sasmex.net/api/v1/alerts/latest/cap/', timeout=2, headers={'Accept': 'application/xml'})
-                    if resp.status_code != 200:
+                    response = requests.get('https://rss.sasmex.net/api/v1/alerts/latest/cap/', timeout=5, headers={'Accept': 'application/xml'})
+                    if response.status_code == 200:
+                        try:
+                            root = ET.fromstring(response.content)
+                            logger.info("=== XML parseado correctamente ===")
+                            entries = root.findall('atom:entry', ns)
+                            logger.info(f"\U0001F4E5 {len(entries)} entradas encontradas")
+
+                            for entry in entries:
+                                entry_id = get_text(entry, 'atom:id', ns)
+                                title = get_text(entry, 'atom:title', ns)
+                                content = entry.find('atom:content', ns)
+
+                                if not entry_id or not title or content is None:
+                                    logger.warning("⚠️ Entrada incompleta, saltando...")
+                                    continue
+
+                                if entry_id == last_identifier:
+                                    logger.info(f"Identifier {entry_id} ya procesado")
+                                    continue
+
+                                alert = content.find('cap:alert', ns)
+                                if alert is None:
+                                    logger.warning("⚠️ No se encontró <alert> dentro de <content>. Saltando esta entrada.")
+                                    continue
+
+                                sent = get_text(alert, 'cap:sent', ns)
+
+                                msg = {
+                                    'id': entry_id,
+                                    'title': title,
+                                    'sent': sent,
+                                    'identifier': get_text(alert, 'cap:identifier', ns),
+                                    'msgType': get_text(alert, 'cap:msgType', ns),
+                                    'severity': '',
+                                    'description': '',
+                                    'info': []
+                                }
+
+                                info = alert.find('cap:info', ns)
+                                if info is not None:
+                                    msg['severity'] = get_text(info, 'cap:severity', ns)
+                                    msg['description'] = get_text(info, 'cap:description', ns)
+
+                                    circle = info.find('cap:area/cap:circle', ns)
+                                    if circle is not None and circle.text:
+                                        msg['circle'] = circle.text
+
+                                socketio.emit('new_message', msg)
+                                notificar_telegram(f"\U0001F514 Alerta sísmica: {msg['title']}")
+                                messages.append(msg)
+                                last_identifier = entry_id
+
+                                if len(messages) > 1000:
+                                    messages = messages[-500:]
+
+                                logger.info(f"\U0001F6E0 Identifier nuevo detectado y procesado: {entry_id}")
+
+                        except ET.ParseError as e:
+                            logger.error(f"❌ Error al parsear XML: {str(e)}")
+                            continue
+                    else:
                         errores += 1
-                        logger.warning(f"Status: {resp.status_code}")
+                        logger.warning(f"Error al obtener el RSS. Código: {response.status_code}")
                         if errores >= 3 and not notificado:
                             notificar_telegram("⚠️ Falla RSS x3")
                             notificado = True
                         continue
-
-                    errores = 0
-                    notificado = False
-                    root = ET.fromstring(resp.content)
-                    entries = root.findall('atom:entry', ns)
-
-                    for entry in entries:
-                        try:
-                            title = entry.find('atom:title', ns)
-                            updated = entry.find('atom:updated', ns)
-                            content = entry.find('atom:content', ns)
-
-                            if not title or not updated or not content:
-                                continue
-
-                            # Parseo del contenido XML interno de <content>
-                            content_xml = ET.fromstring(content.text.strip())
-                            alert = content_xml.find('cap:alert', ns)
-                            if alert is None:
-                                logger.warning("⚠️ No se encontró <alert> dentro de <content>")
-                                continue
-
-                            identifier = get_text(alert, 'cap:identifier', ns)
-                            logger.info(f"📥 Identificador detectado: {identifier}")
-                            if not identifier or identifier == last_identifier:
-                                continue
-
-                            msg = {
-                                'title': title.text,
-                                'updated': updated.text,
-                                'identifier': identifier,
-                                'info': []
-                            }
-
-                            for tag in ['sender', 'sent', 'status', 'msgType', 'source', 'scope', 'code', 'note', 'references']:
-                                msg[tag] = get_text(alert, f'cap:{tag}', ns)
-
-                            info = alert.find('cap:info', ns)
-                            if info is not None:
-                                msg['info'].append({
-                                    tag: get_text(info, f'cap:{tag}', ns)
-                                    for tag in [
-                                        'language','category','event','responseType','urgency','severity','certainty',
-                                        'audience','effective','onset','expires','senderName','headline',
-                                        'description','instruction','web','contact'
-                                    ]
-                                })
-
-                            socketio.emit('new_message', msg)
-                            last_identifier = identifier
-                            messages.append(msg)
-                            if len(messages) > 1000:
-                                messages = messages[-500:]
-                            notificar_telegram(f"🔔 Alerta sísmica: {title.text}")
-                            logger.info(f"📡 Enviada nueva alerta: {identifier}")
-
-                        except Exception as e:
-                            logger.error(f"Error procesando entrada: {e}")
-                except Exception as e:
+                except requests.exceptions.RequestException as e:
                     errores += 1
-                    logger.error(f"Fallo petición RSS: {e}")
+                    logger.error(f"Error en la solicitud HTTP: {str(e)}")
                     if errores >= 3 and not notificado:
                         notificar_telegram("⚠️ Falla RSS x3")
                         notificado = True
+                    continue
 
             heartbeat += 1
-            if heartbeat % 600 == 0:
+            if heartbeat % 300 == 0:
                 logger.info("✅ fetch_rss activo")
 
         except Exception as e:
-            logger.critical(f"Error crítico en fetch_rss: {e}")
+            logger.error(f"Error crítico: {str(e)}")
 
         socketio.sleep(0.1)
 
@@ -145,16 +155,16 @@ def get_messages():
     return jsonify({'messages': messages})
 
 @socketio.on('connect')
-def conectado():
+def handle_connect():
     logger.info(f"Cliente conectado: {request.sid}")
 
 @socketio.on('disconnect')
-def desconectado():
+def handle_disconnect():
     logger.info(f"Cliente desconectado: {request.sid}")
 
 @socketio.on('mensaje_simulado')
 def handle_mensaje_simulado(data):
-    logger.info(f"🧪 Mensaje simulado recibido: {data}")
+    logger.info(f"\U0001F9EA Mensaje simulado recibido: {data}")
     emit('new_message', data, broadcast=True)
     return {'status': 'ok'}
 
