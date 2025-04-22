@@ -219,6 +219,15 @@ def handle_disconnect():
 def handle_mensaje_simulado(data):
     logger.info(f"🧪 Mensaje simulado recibido: {data}")
     emit('new_message', data, broadcast=True)
+
+    # Enviar el mensaje simulado a Telegram
+    try:
+        mensaje_telegram = f"🔔 Simulación: {data.get('title', 'Sin título')}"
+        notificar_telegram(mensaje_telegram)
+        logger.info("Mensaje simulado enviado a Telegram.")
+    except Exception as e:
+        logger.error(f"Fallo al enviar mensaje simulado a Telegram: {e}")
+        
     return {'status': 'ok'}
 
 if __name__ == '__main__':
