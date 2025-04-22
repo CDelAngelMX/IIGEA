@@ -1,4 +1,5 @@
 import eventlet
+import json
 
 # Parcheo de eventlet
 eventlet.monkey_patch()
@@ -28,6 +29,10 @@ messages = []
 last_identifier = None
 last_fetch_time = datetime.now() - timedelta(seconds=2)
 
+# Firebase Cloud Messaging
+FCM_SERVER_KEY = "TU_CLAVE_DE_SERVIDOR_AQUI"
+FCM_URL = "https://fcm.googleapis.com/fcm/send"
+
 # Telegram
 TELEGRAM_CHAT_ID = "6134394569"
 TELEGRAM_BOT_TOKEN = "7659663435:AAESZfoSnX-7F4d44_lgBotKRK3uEymeINY"
@@ -39,10 +44,42 @@ def notificar_telegram(mensaje):
     except Exception as e:
         logger.error(f"Telegram fallo: {e}")
 
+def send_to_fcm(message):
+    """
+    Envía un mensaje a Firebase Cloud Messaging (FCM).
+    :param message: Diccionario con los datos del mensaje.
+    """
+    headers = {
+        "Authorization": f"key={A07rSIAKesjrScKPzgqxaVRz-gg9iozEZpuyI2GHXXw}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "to": "/topics/sismos",  # Envía a todos los usuarios suscritos al tema "sismos"
+        "priority": "high",
+        "data": {
+            "id": message.get("id", ""),
+            "title": message.get("title", "Alerta Sísmica"),
+            "sent": message.get("sent", ""),
+            "severity": message.get("severity", ""),
+            "description": message.get("description", ""),
+            "circle": message.get("circle", "")
+        }
+    }
+    try:
+        response = requests.post(FCM_URL, headers=headers, data=json.dumps(payload), timeout=5)
+        if response.status_code == 200:
+            logger.info("Mensaje enviado exitosamente a FCM")
+        else:
+            logger.error(f"Error al enviar mensaje a FCM: {response.status_code}, {response.text}")
+    except Exception as e:
+        logger.error(f"Excepción al enviar mensaje a FCM: {str(e)}")
+
+# Función auxiliar para obtener texto de manera segura
 def get_text(element, xpath, ns, default=None):
     node = element.find(xpath, ns)
     return node.text if node is not None and node.text else default
 
+# Espacios de nombres
 ns = {
     'atom': 'http://www.w3.org/2005/Atom',
     'cap': 'urn:oasis:names:tc:emergency:cap:1.1'
@@ -59,22 +96,27 @@ def fetch_rss():
             current_time = datetime.now()
             if (current_time - last_fetch_time).total_seconds() >= 1:
                 last_fetch_time = current_time
-                logger.info("\U0001F680 Obteniendo RSS...")
+                logger.info("🚀 Obteniendo RSS...")
                 try:
-                    response = requests.get('https://rss.sasmex.net/api/v1/alerts/latest/cap/', timeout=5, headers={'Accept': 'application/xml'})
+                    response = requests.get(
+                        'https://rss.sasmex.net/api/v1/alerts/latest/cap/',
+                        timeout=5,
+                        headers={'Accept': 'application/xml'}
+                    )
                     if response.status_code == 200:
-                        try:
-                            root = ET.fromstring(response.content)
-                            logger.info("=== XML parseado correctamente ===")
-                            entries = root.findall('atom:entry', ns)
-                            logger.info(f"\U0001F4E5 {len(entries)} entradas encontradas")
+                        root = ET.fromstring(response.content)
+                        logger.info("=== XML parseado correctamente ===")
+                        entries = root.findall('atom:entry', ns)
+                        logger.info(f"📥 {len(entries)} entradas encontradas")
 
-                            for entry in entries:
+                        for entry in entries:
+                            try:
                                 entry_id = get_text(entry, 'atom:id', ns)
                                 title = get_text(entry, 'atom:title', ns)
+                                updated = get_text(entry, 'atom:updated', ns)
                                 content = entry.find('atom:content', ns)
 
-                                if not entry_id or not title or content is None:
+                                if not entry_id or not title or not content:
                                     logger.warning("⚠️ Entrada incompleta, saltando...")
                                     continue
 
@@ -82,10 +124,19 @@ def fetch_rss():
                                     logger.info(f"Identifier {entry_id} ya procesado")
                                     continue
 
-                                alert = content.find('cap:alert', ns)
-                                if alert is None:
-                                    logger.warning("⚠️ No se encontró <alert> dentro de <content>. Saltando esta entrada.")
+                                if content.text is None or not content.text.strip():
+                                    if not list(content):
+                                        logger.warning("⚠️ El campo <content> está vacío o no contiene XML. Saltando esta entrada.")
+                                        continue
+
+                                try:
+                                    inner_xml = ET.tostring(content[0], encoding='unicode')
+                                    content_xml = ET.fromstring(inner_xml)
+                                except ET.ParseError as e:
+                                    logger.error(f"❌ Error al parsear <content>: {str(e)}")
                                     continue
+
+                                alert = content_xml  # Ya es el <alert>
 
                                 sent = get_text(alert, 'cap:sent', ns)
 
@@ -109,22 +160,28 @@ def fetch_rss():
                                     if circle is not None and circle.text:
                                         msg['circle'] = circle.text
 
+                                    msg["info"] = [{
+                                        "severity": msg["severity"],
+                                        "description": msg["description"],
+                                        "circle": msg.get("circle", "")
+                                    }]
+
                                 socketio.emit('new_message', msg)
-                                notificar_telegram(f"\U0001F514 Alerta sísmica: {msg['title']}")
-                                messages.append(msg)
+                                logger.info(f"🛠 Identifier nuevo detectado y procesado: {entry_id}")
+                                notificar_telegram(f"🔔 Alerta sísmica: {title}")
+                                send_to_fcm(msg)  # Enviar mensaje a FCM
                                 last_identifier = entry_id
+                                messages.append(msg)
 
                                 if len(messages) > 1000:
                                     messages = messages[-500:]
 
-                                logger.info(f"\U0001F6E0 Identifier nuevo detectado y procesado: {entry_id}")
-
-                        except ET.ParseError as e:
-                            logger.error(f"❌ Error al parsear XML: {str(e)}")
-                            continue
+                            except Exception as e:
+                                logger.error(f"Error al procesar entrada: {e}")
                     else:
                         errores += 1
-                        logger.warning(f"Error al obtener el RSS. Código: {response.status_code}")
+                        logger.warning(f"Status: {response.status_code}")
+                        logger.error(f"Contenido de la respuesta: {response.text[:500]}...")
                         if errores >= 3 and not notificado:
                             notificar_telegram("⚠️ Falla RSS x3")
                             notificado = True
@@ -135,15 +192,11 @@ def fetch_rss():
                     if errores >= 3 and not notificado:
                         notificar_telegram("⚠️ Falla RSS x3")
                         notificado = True
-                    continue
-
             heartbeat += 1
             if heartbeat % 300 == 0:
                 logger.info("✅ fetch_rss activo")
-
         except Exception as e:
             logger.error(f"Error crítico: {str(e)}")
-
         socketio.sleep(0.1)
 
 @app.route('/')
@@ -164,7 +217,7 @@ def handle_disconnect():
 
 @socketio.on('mensaje_simulado')
 def handle_mensaje_simulado(data):
-    logger.info(f"\U0001F9EA Mensaje simulado recibido: {data}")
+    logger.info(f"🧪 Mensaje simulado recibido: {data}")
     emit('new_message', data, broadcast=True)
     return {'status': 'ok'}
 
