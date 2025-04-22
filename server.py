@@ -30,7 +30,7 @@ last_identifier = None
 last_fetch_time = datetime.now() - timedelta(seconds=2)
 
 # Firebase Cloud Messaging
-FCM_SERVER_KEY = "TU_CLAVE_DE_SERVIDOR_AQUI"
+FCM_SERVER_KEY = "A07rSIAKesjrScKPzgqxaVRz-gg9iozEZpuyI2GHXXw"
 FCM_URL = "https://fcm.googleapis.com/fcm/send"
 
 # Telegram
@@ -50,7 +50,7 @@ def send_to_fcm(message):
     :param message: Diccionario con los datos del mensaje.
     """
     headers = {
-        "Authorization": f"key={A07rSIAKesjrScKPzgqxaVRz-gg9iozEZpuyI2GHXXw}",
+        "Authorization": f"key={FCM_SERVER_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
